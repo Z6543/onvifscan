@@ -403,7 +403,7 @@ REQUESTS = [
     {
         "name": "ContinuousMove",
         "endpoint": None,
-        "body": '<ContinuousMove xmlns="http://www.onvif.org/ver20/ptz/wsdl"><ProfileToken>Profile_1</ProfileToken><Velocity><PanTilt x="0.0" y="0.0" xmlns="http://www.onvif.org/ver10/schema"/></Velocity></ContinuousMove>',
+        "body": '<ContinuousMove xmlns="http://www.onvif.org/ver20/ptz/wsdl"><ProfileToken>Profile1</ProfileToken><Velocity><PanTilt xmlns="http://www.onvif.org/ver10/schema" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace" x="0.0" y="0.0"/><Zoom xmlns="http://www.onvif.org/ver10/schema" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/VelocityGenericSpace" x="0.0"/></Velocity></ContinuousMove>',
         "auth_required": True,
         "description": "Attempts continuous PTZ movement (destructive - may move camera).",
         "destructive": True
@@ -411,7 +411,7 @@ REQUESTS = [
     {
         "name": "AbsoluteMove",
         "endpoint": None,
-        "body": '<AbsoluteMove xmlns="http://www.onvif.org/ver20/ptz/wsdl"><ProfileToken>Profile_1</ProfileToken><Position><PanTilt x="0.0" y="0.0" xmlns="http://www.onvif.org/ver10/schema"/><Zoom x="1.0" xmlns="http://www.onvif.org/ver10/schema"/></Position></AbsoluteMove>',
+        "body": '<AbsoluteMove xmlns="http://www.onvif.org/ver20/ptz/wsdl"><ProfileToken>Profile1</ProfileToken><Position><PanTilt xmlns="http://www.onvif.org/ver10/schema" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace" x="0.0" y="0.0"/><Zoom xmlns="http://www.onvif.org/ver10/schema" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace" x="0.0"/></Position></AbsoluteMove>',
         "auth_required": True,
         "description": "Attempts absolute PTZ movement (destructive - may move camera).",
         "destructive": True
@@ -547,21 +547,93 @@ HEADERS = {
 }
 
 
+def parse_soap_fault(response_text: str) -> Dict[str, Any]:
+    """
+    Parse SOAP fault response to determine fault type.
+
+    Returns dict with:
+    - is_fault: bool - whether this is a SOAP fault
+    - fault_type: str - 'auth', 'param_validation', 'not_implemented', 'other'
+    - fault_code: str - the fault code value
+    - fault_reason: str - the fault reason text
+    """
+    result = {
+        'is_fault': False,
+        'fault_type': 'other',
+        'fault_code': '',
+        'fault_reason': ''
+    }
+
+    try:
+        root = ET.fromstring(response_text)
+
+        # Check for SOAP Fault element
+        fault = root.find(".//{http://www.w3.org/2003/05/soap-envelope}Fault")
+        if fault is None:
+            return result
+
+        result['is_fault'] = True
+
+        # Extract fault code
+        value_elem = fault.find(".//{http://www.w3.org/2003/05/soap-envelope}Value")
+        if value_elem is not None:
+            result['fault_code'] = value_elem.text or ''
+
+        # Extract subcode (more specific error)
+        subcode_value = fault.findall(".//{http://www.w3.org/2003/05/soap-envelope}Subcode/{http://www.w3.org/2003/05/soap-envelope}Value")
+        if subcode_value:
+            result['fault_code'] = subcode_value[0].text or ''
+
+        # Extract reason text
+        reason_elem = fault.find(".//{http://www.w3.org/2003/05/soap-envelope}Text")
+        if reason_elem is not None:
+            result['fault_reason'] = reason_elem.text or ''
+
+        # Classify fault type based on fault code and reason
+        fault_code_lower = result['fault_code'].lower()
+        fault_reason_lower = result['fault_reason'].lower()
+
+        # Authentication/Authorization errors
+        if any(x in fault_code_lower for x in ['notauthorized', 'unauthorized', 'notauthenticated']):
+            result['fault_type'] = 'auth'
+        elif any(x in fault_reason_lower for x in ['not authorized', 'unauthorized', 'authentication', 'not authenticated']):
+            result['fault_type'] = 'auth'
+        # Parameter validation errors (indicate the service is accessible but params are wrong)
+        elif any(x in fault_code_lower for x in ['invalidargval', 'invalidargs', 'noconfig', 'noprofile', 'notoken']):
+            result['fault_type'] = 'param_validation'
+        elif any(x in fault_reason_lower for x in ['invalid argument', 'invalid parameter', 'no config', 'no profile']):
+            result['fault_type'] = 'param_validation'
+        # Not implemented errors
+        elif 'not implemented' in fault_reason_lower or 'not recognized' in fault_reason_lower:
+            result['fault_type'] = 'not_implemented'
+
+    except ET.ParseError:
+        pass
+
+    return result
+
+
 def send_request(request: Dict[str, Any], url: str, timeout: float = 5.0) -> Dict[str, Any]:
     """Send SOAP request and return response details."""
     soap_body = SOAP_ENVELOPE.format(body=request["body"])
     try:
         response = requests.post(url, headers=HEADERS, data=soap_body, timeout=timeout)
+
+        # Parse SOAP fault if present
+        fault_info = parse_soap_fault(response.text)
+
         return {
             "status_code": response.status_code,
             "content": response.text,
-            "success": response.status_code == 200 and "Fault" not in response.text
+            "success": response.status_code == 200 and not fault_info['is_fault'],
+            "fault_info": fault_info
         }
     except requests.RequestException as e:
         return {
             "status_code": None,
             "content": str(e),
-            "success": False
+            "success": False,
+            "fault_info": {'is_fault': False, 'fault_type': 'other', 'fault_code': '', 'fault_reason': ''}
         }
 
 
@@ -580,6 +652,23 @@ def parse_get_services(response_text: str) -> Dict[str, str]:
     except ET.ParseError:
         pass
     return endpoints
+
+
+def parse_profiles(response_text: str) -> List[str]:
+    """Parse GetProfiles response to extract valid profile tokens."""
+    profile_tokens = []
+    try:
+        root = ET.fromstring(response_text)
+        # Look for Profile elements with token attribute
+        # Namespaces can vary, so search broadly
+        for profile in root.iter():
+            if 'Profile' in profile.tag:
+                token = profile.get('token')
+                if token and token not in profile_tokens:
+                    profile_tokens.append(token)
+    except ET.ParseError:
+        pass
+    return profile_tokens
 
 
 def scan_onvif_device(base_url: str, test_all: bool = False, timeout: float = 5.0, verbose: bool = False) -> Dict[str, Any]:
@@ -601,6 +690,19 @@ def scan_onvif_device(base_url: str, test_all: bool = False, timeout: float = 5.
     # Parse service endpoints
     endpoints = parse_get_services(response["content"])
 
+    # Try to get valid profile tokens from GetProfiles
+    profile_tokens = []
+    media_endpoint = endpoints.get("http://www.onvif.org/ver10/media/wsdl")
+    if media_endpoint:
+        get_profiles_req = next((req for req in REQUESTS if req["name"] == "GetProfiles"), None)
+        if get_profiles_req:
+            profiles_response = send_request(get_profiles_req, media_endpoint, timeout)
+            if profiles_response["success"]:
+                profile_tokens = parse_profiles(profiles_response["content"])
+
+    # Use first valid profile token, or fallback to common defaults
+    valid_profile_token = profile_tokens[0] if profile_tokens else "Profile1"
+
     # Update request endpoints based on discovered services
     updated_requests = []
     for req in REQUESTS:
@@ -609,6 +711,13 @@ def scan_onvif_device(base_url: str, test_all: bool = False, timeout: float = 5.
         # Skip destructive operations unless comprehensive mode (-a/--all)
         if req.get("destructive", False) and not test_all:
             continue
+
+        # Update request body with valid profile token
+        # Replace hardcoded profile tokens with discovered ones
+        if "ProfileToken" in req_copy["body"]:
+            # Replace Profile_1, Profile1, etc. with the valid token
+            req_copy["body"] = req_copy["body"].replace("Profile_1", valid_profile_token)
+            req_copy["body"] = req_copy["body"].replace("Profile1", valid_profile_token)
 
         if req["endpoint"] is None:
             # Look up service endpoint
@@ -680,18 +789,35 @@ def scan_onvif_device(base_url: str, test_all: bool = False, timeout: float = 5.
         url = req["endpoint"]
         response = send_request(req, url, timeout)
 
-        # Determine result message
-        if response["success"] and req["auth_required"]:
-            result_msg = "SECURITY ISSUE: responded without authentication!"
+        # Determine result message based on response and fault type
+        fault_info = response.get("fault_info", {})
+        fault_type = fault_info.get('fault_type', 'other')
+
+        # Check if this indicates unauthenticated access
+        # Success (200 OK) or parameter validation errors both indicate the service is accessible
+        is_accessible = response["success"] or (fault_type == 'param_validation')
+
+        if is_accessible and req["auth_required"]:
+            # Security issue: service should require auth but accepts unauthenticated requests
+            if response["success"]:
+                result_msg = "SECURITY ISSUE: responded without authentication!"
+            else:
+                result_msg = f"SECURITY ISSUE: accessible without authentication (param validation error: {fault_info.get('fault_code', 'unknown')})"
             security_issue = True
-        elif response["success"]:
+        elif is_accessible and not req["auth_required"]:
+            # Expected behavior: service designed to be unauthenticated
             result_msg = "responded as expected (unauthenticated by design)"
             security_issue = False
-        elif response["status_code"] == 401 or "NotAuthorized" in response["content"]:
+        elif response["status_code"] == 401 or fault_type == 'auth':
+            # Properly secured: requires authentication
             result_msg = "requires authentication (secure)"
             security_issue = False
         else:
-            result_msg = f"failed: {response['content'][:50]}..."
+            # Other failures (not implemented, network errors, etc.)
+            if fault_type == 'not_implemented':
+                result_msg = f"not implemented: {fault_info.get('fault_reason', 'unknown')[:80]}"
+            else:
+                result_msg = f"failed: {response['content'][:50]}..."
             security_issue = False
 
         results.append({
@@ -701,6 +827,7 @@ def scan_onvif_device(base_url: str, test_all: bool = False, timeout: float = 5.
             "auth_required": req["auth_required"],
             "endpoint": url,
             "security_issue": security_issue,
+            "fault_info": fault_info,
             "response_content": response["content"] if verbose or len(response["content"]) < 1000 else response["content"][:1000] + "..."
         })
 

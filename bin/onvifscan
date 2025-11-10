@@ -96,12 +96,23 @@ class OnvifScanOutputFormatter(OutputFormatter):
                     auth_indicator = "[AUTH]" if result_item["auth_required"] else "[OPEN]"
                     lines.append(f"  {color}{auth_indicator} {result_item['name']}: {result_item['result']}{Fore.RESET}")
 
-                    # Add verbose output - full response content
-                    if self.verbose and "response_content" in result_item and result_item["response_content"]:
-                        lines.append(Fore.MAGENTA + f"    Response Content:" + Fore.RESET)
-                        content = result_item["response_content"]
-                        lines.extend([f"    {line}" for line in content.split('\n') if line.strip()])
-                        lines.append("")
+                    # Add verbose output - fault info and response content
+                    if self.verbose:
+                        fault_info = result_item.get("fault_info", {})
+                        if fault_info.get("is_fault"):
+                            lines.append(Fore.MAGENTA + f"    SOAP Fault Details:" + Fore.RESET)
+                            lines.append(f"      Fault Type: {fault_info.get('fault_type', 'unknown')}")
+                            if fault_info.get('fault_code'):
+                                lines.append(f"      Fault Code: {fault_info.get('fault_code')}")
+                            if fault_info.get('fault_reason'):
+                                lines.append(f"      Fault Reason: {fault_info.get('fault_reason')}")
+                            lines.append("")
+
+                        if "response_content" in result_item and result_item["response_content"]:
+                            lines.append(Fore.MAGENTA + f"    Response Content:" + Fore.RESET)
+                            content = result_item["response_content"]
+                            lines.extend([f"    {line}" for line in content.split('\n') if line.strip()])
+                            lines.append("")
 
                 lines.append("")
         else:

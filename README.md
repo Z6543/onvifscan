@@ -9,6 +9,13 @@ This toolkit provides two main security testing tools for ONVIF devices:
 - **onvifscan**: ONVIF device security scanner that tests for unauthenticated access vulnerabilities and performs credential brute-forcing
 - **wsdiscovery**: WS-Discovery protocol scanner for discovering ONVIF devices on the network
 
+## Key Features
+
+- **Advanced SOAP Fault Analysis**: Distinguishes between authentication errors, parameter validation errors, and "not implemented" responses
+- **Smart Parameter Detection**: Automatically discovers valid ProfileTokens from the device and uses them in requests
+- **Comprehensive Security Detection**: Detects unauthenticated access even when requests fail due to parameter validation (e.g., invalid tokens)
+- **Enhanced Reporting**: Categorizes results by fault type with detailed verbose output including SOAP fault codes
+
 ## Usage
 
 ### wsdiscovery
@@ -51,4 +58,3 @@ onvifscan brute http://192.168.1.100
 # Use custom wordlists
 onvifscan brute http://192.168.1.100 --usernames users.txt --passwords passwords.txt
 ```
-
